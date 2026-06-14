@@ -1,121 +1,83 @@
 from __future__ import annotations
 
-from typing import List, Optional
-
-from datetime import datetime, timedelta
-from urllib.parse import urljoin
-
-import requests
-from bs4 import BeautifulSoup, Tag
+from typing import List
+from bs4 import BeautifulSoup
 
 from models import NewsItem
+from .base_parser import BaseParser
+from .date_utils import parse_date_from_tag, parse_date_from_url
 
 
-BASE_URL = "https://adindex.ru"
-NEWS_URL = "https://adindex.ru/"
+class AdindexParser(BaseParser):
+    """Парсер новостей с сайта adindex.ru."""
+    
+    BASE_URL = "https://adindex.ru"
+    NEWS_URL = "https://adindex.ru/news/hr/"
+    SOURCE_NAME = "adindex"
+    
+    HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    }
+    
+    def _parse_page(self, soup: BeautifulSoup, cutoff, seen_urls) -> List[NewsItem]:
+        """Парсит новости с одной страницы adindex.ru."""
+        items: List[NewsItem] = []
+        
+        # Более специфичные селекторы для adindex
+        selectors = [
+            "article a[href]",  # Новости в статьях
+            ".news-item a[href]",  # Новости с классом news-item
+            ".item a[href]",  # Новости с классом item
+            "h2 a[href]",  # Заголовки с ссылками
+            "h3 a[href]",  # Подзаголовки с ссылками
+        ]
+        
+        for selector in selectors:
+            for link in soup.select(selector):
+                href = link.get("href")
+                if not href:
+                    continue
+                
+                title = link.get_text(strip=True)
+                if not title or len(title) < 10:
+                    continue
+                
+                # Пропускаем ссылки на главную, контакты, политику конфиденциальности и т.д.
+                skip_keywords = ["/privacy-policy", "/contacts", "/about", "/help", "главная", "назад"]
+                if any(keyword in href.lower() or keyword in title.lower() for keyword in skip_keywords):
+                    continue
+                
+                url = self._make_absolute_url(href)
+                if not url:
+                    continue
 
-HEADERS = {
-    "User-Agent": "pars_news/0.1 (+https://adindex.ru/)",
-}
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
 
+                # Ищем дату в родительском элементе
+                parent = link.find_parent(["article", "div", "section"])
+                published_at = parse_date_from_tag(parent) if parent else None
+                if not published_at:
+                    published_at = parse_date_from_url(url)
+                
+                if published_at and published_at < cutoff:
+                    continue
 
-def _parse_date_from_block(block: Tag) -> Optional[datetime]:
-    time_tag = block.find("time")
-    if time_tag:
-        dt_attr = time_tag.get("datetime")
-        if dt_attr:
-            try:
-                # Обрезаем зону, если есть
-                return datetime.fromisoformat(dt_attr.split("+")[0])
-            except ValueError:
-                pass
-        text = time_tag.get_text(strip=True)
-        for fmt in ("%d.%m.%y", "%d.%m.%Y"):
-            try:
-                return datetime.strptime(text.split()[0], fmt)
-            except ValueError:
-                continue
-    return None
+                items.append(
+                    NewsItem(
+                        title=title,
+                        url=url,
+                        source=self.SOURCE_NAME,
+                        published_at=published_at,
+                    )
+                )
 
-
-def _find_next_page(soup: BeautifulSoup) -> Optional[str]:
-    # rel="next"
-    link = soup.find("a", rel="next")
-    if not link:
-        # Текст вида "Следующая" / "Следующая страница"
-        for a in soup.find_all("a"):
-            text = a.get_text(strip=True).lower()
-            if "следующая" in text:
-                link = a
-                break
-    if not link:
-        return None
-
-    href = link.get("href")
-    if not href:
-        return None
-
-    return urljoin(NEWS_URL, href)
+        return items
 
 
 def fetch(limit: int = 200, days: int = 7) -> List[NewsItem]:
-    cutoff = datetime.utcnow() - timedelta(days=days)
-    items: List[NewsItem] = []
-    seen_urls: set[str] = set()
-
-    page_url: Optional[str] = NEWS_URL
-    pages_parsed = 0
-    max_pages = 10
-
-    while page_url and pages_parsed < max_pages and len(items) < limit:
-        resp = requests.get(page_url, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-
-        soup = BeautifulSoup(resp.text, "html.parser")
-        pages_parsed += 1
-
-        # Вёрстка AdIndex может меняться; этот селектор основан на блоке "Новости".
-        for block in soup.select("div:has(> a)"):
-            link = block.find("a", href=True)
-            if not link:
-                continue
-
-            title = link.get_text(strip=True)
-            if not title:
-                continue
-
-            href = link["href"]
-            if href.startswith("/"):
-                url = urljoin(BASE_URL, href)
-            elif href.startswith("http"):
-                url = href
-            else:
-                continue
-
-            if url in seen_urls:
-                continue
-            seen_urls.add(url)
-
-            published_at = _parse_date_from_block(block)
-            if published_at and published_at < cutoff:
-                continue
-
-            items.append(
-                NewsItem(
-                    title=title,
-                    url=url,
-                    source="adindex",
-                    published_at=published_at,
-                )
-            )
-
-            if len(items) >= limit:
-                break
-
-        if len(items) >= limit:
-            break
-
-        page_url = _find_next_page(soup)
-
-    return items
-
+    """Функция для обратной совместимости."""
+    parser = AdindexParser()
+    return parser.fetch(limit, days)

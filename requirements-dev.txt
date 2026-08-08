@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Тесты можно запускать и без pytest (py test_units.py), но с ним удобнее
+pytest>=8.0.0

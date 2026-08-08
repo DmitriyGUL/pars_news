@@ -434,19 +434,74 @@ def parse_summary_from_html(soup: BeautifulSoup) -> Optional[str]:
     return None
 
 
+# Полный текст статьи нужен только для разбора кадровых событий: имя, должность
+# и обе компании обычно стоят не в лиде, а в теле материала. Ограничение сверху
+# защищает базу от лонгридов на десятки тысяч знаков.
+BODY_MAX_LENGTH = 20000
+
+# Абзацы короче этого — подписи к фото, врезки «Читайте также», кнопки.
+BODY_MIN_PARAGRAPH = 40
+
+# Мусор, который попадается внутри статьи и в текст попадать не должен.
+BODY_NOISE = (
+    "читайте также", "читайте по теме", "подписывайтесь", "подписаться",
+    "поделиться", "реклама", "фото:", "источник:", "нашли ошибку",
+    "материалы по теме", "все новости",
+)
+
+
+def parse_article_body(soup: BeautifulSoup) -> Optional[str]:
+    """
+    Полный текст статьи из абзацев основного содержимого.
+
+    Берётся тот же контейнер, что и для лида, — из него уже вырезаны шапка,
+    меню и подвал. Короткие абзацы и служебные врезки отбрасываются: они
+    засоряют текст и сбивают извлечение имён и должностей.
+    """
+    content = _main_content(soup)
+    if content is None:
+        return None
+
+    parts = []
+    for paragraph in content.find_all(["p", "li"]):
+        text = " ".join(paragraph.get_text(" ", strip=True).split())
+        if len(text) < BODY_MIN_PARAGRAPH:
+            continue
+        lowered = text.lower()
+        if any(noise in lowered for noise in BODY_NOISE):
+            continue
+        parts.append(text)
+
+    if not parts:
+        return None
+
+    body = "\n".join(parts)
+    return body[:BODY_MAX_LENGTH]
+
+
 class ArticleMeta(NamedTuple):
     """Данные, которые вытаскиваются из страницы статьи за один запрос."""
 
     published_at: Optional[datetime] = None
     summary: Optional[str] = None
+    body: Optional[str] = None
 
 
-def parse_article_meta(html: str) -> ArticleMeta:
-    """Дата публикации и лид из HTML статьи — с единственным разбором дерева."""
+def parse_article_meta(html: str, with_body: bool = False) -> ArticleMeta:
+    """
+    Дата публикации, лид и (по запросу) полный текст статьи.
+
+    Дерево разбирается один раз. Полный текст запрашивается отдельно, потому
+    что нужен лишь для кадровых событий: хранить тело каждой новости в базе
+    незачем.
+    """
     soup = BeautifulSoup(html, "html.parser")
-    # Порядок важен: parse_summary_from_html вырезает из дерева шапку и подвал,
-    # поэтому дату ищем первой — часть сайтов держит её в <header> статьи.
-    return ArticleMeta(_date_from_soup(soup), parse_summary_from_html(soup))
+    # Порядок важен: разбор лида вырезает из дерева шапку и подвал, поэтому
+    # дату ищем первой — часть сайтов держит её в <header> статьи.
+    published_at = _date_from_soup(soup)
+    summary = parse_summary_from_html(soup)
+    body = parse_article_body(soup) if with_body else None
+    return ArticleMeta(published_at, summary, body)
 
 
 # Сколько статей догружаем параллельно. Небольшое значение, чтобы не создавать
@@ -489,13 +544,14 @@ def fetch_article_meta(
     url: str,
     headers: Dict[str, str],
     session: Optional[requests.Session] = None,
+    with_body: bool = False,
 ) -> ArticleMeta:
     """Дата и лид со страницы статьи; пустой ArticleMeta, если она недоступна."""
     http = session if session is not None else _get_thread_session(headers)
     try:
         resp = http.get(url, timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
-        return parse_article_meta(decode_response(resp))
+        return parse_article_meta(decode_response(resp), with_body=with_body)
     except requests.RequestException:
         return ArticleMeta()
 

@@ -362,6 +362,10 @@ def _analyze_news_items(news_items: List[NewsItem]) -> Tuple[List[Dict], Dict[st
             'source': news.source,
             'published_at': published_at,
             'summary': news.summary,
+            # Полный текст есть только у кадровых событий (команда enrich-hr).
+            # Теги по нему намеренно не считаются: разметка должна оставаться
+            # одинаковой независимо от того, догрузили тело статьи или нет.
+            'full_text': news.full_text,
             'companies': ", ".join(name for name, _ in companies_found),
             'companies_count': len(companies_found),
             'material_type': analysis.material_type,

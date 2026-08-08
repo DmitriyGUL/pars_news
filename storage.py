@@ -72,7 +72,13 @@ def init_db() -> None:
             conn.execute("ALTER TABLE news ADD COLUMN created_at TEXT")
             # Обновляем существующие записи с текущей датой
             conn.execute("UPDATE news SET created_at = datetime('now') WHERE created_at IS NULL")
-        
+
+        if 'full_text' not in columns:
+            # Полный текст статьи. Хранится не у всех новостей, а только у
+            # кадровых событий: имя, должность и обе компании обычно стоят в
+            # теле материала, а лид их не содержит.
+            conn.execute("ALTER TABLE news ADD COLUMN full_text TEXT")
+
         # Таблица компаний
         conn.execute(
             """
@@ -142,10 +148,15 @@ def save_news(items: Iterable[NewsItem]) -> int:
     return inserted
 
 
+# Колонки, которые выбираются под NewsItem. Держим одной строкой, чтобы
+# порядок в SELECT и в распаковке не разъезжался.
+NEWS_COLUMNS = "title, url, source, published_at, summary, full_text"
+
+
 def _rows_to_news_items(rows: Iterable[tuple]) -> List[NewsItem]:
-    """Преобразует строки выборки (title, url, source, published_at, summary) в NewsItem."""
+    """Преобразует строки выборки (см. NEWS_COLUMNS) в NewsItem."""
     items: List[NewsItem] = []
-    for title, url, source, published_at_str, summary in rows:
+    for title, url, source, published_at_str, summary, full_text in rows:
         published_at = None
         if published_at_str:
             try:
@@ -160,6 +171,7 @@ def _rows_to_news_items(rows: Iterable[tuple]) -> List[NewsItem]:
                 source=source,
                 published_at=published_at,
                 summary=summary,
+                full_text=full_text,
             )
         )
     return items
@@ -168,8 +180,8 @@ def _rows_to_news_items(rows: Iterable[tuple]) -> List[NewsItem]:
 def get_latest(limit: int = 50) -> List[NewsItem]:
     with get_connection() as conn:
         cursor = conn.execute(
-            """
-            SELECT title, url, source, published_at, summary
+            f"""
+            SELECT {NEWS_COLUMNS}
             FROM news
             ORDER BY id DESC
             LIMIT ?
@@ -254,6 +266,32 @@ def get_news_urls_for_summary(
         return [row[0] for row in cursor.fetchall()]
 
 
+def update_full_text(url: str, full_text: str | None) -> None:
+    """Сохраняет полный текст статьи для одной новости."""
+    with get_connection() as conn:
+        conn.execute("UPDATE news SET full_text = ? WHERE url = ?", (full_text, url))
+        conn.commit()
+
+
+def get_urls_without_full_text(urls: Iterable[str]) -> List[str]:
+    """Из переданных URL оставляет те, у которых полного текста ещё нет."""
+    urls = list(urls)
+    if not urls:
+        return []
+
+    with get_connection() as conn:
+        placeholders = ",".join("?" * len(urls))
+        cursor = conn.execute(
+            f"""
+            SELECT url FROM news
+            WHERE url IN ({placeholders})
+              AND (full_text IS NULL OR trim(full_text) = '')
+            """,
+            urls,
+        )
+        return [row[0] for row in cursor.fetchall()]
+
+
 def update_summary(url: str, summary: str | None) -> None:
     """Обновляет лид одной новости."""
     with get_connection() as conn:
@@ -325,8 +363,8 @@ def get_news_by_date_range(start_date: str | datetime, end_date: str | datetime)
     """
     with get_connection() as conn:
         cursor = conn.execute(
-            """
-            SELECT title, url, source, published_at, summary
+            f"""
+            SELECT {NEWS_COLUMNS}
             FROM news
             WHERE published_at IS NOT NULL
               AND substr(published_at, 1, 10) BETWEEN ? AND ?

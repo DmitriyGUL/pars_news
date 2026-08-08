@@ -26,9 +26,16 @@ from company_analyzer import (
 )
 from models import NewsItem
 from sources import adindex, comnews, forbes_companies, rbc_companies, ria_companies
+from hr_details import (
+    extract_details,
+    extract_organizations,
+    extract_persons,
+    highlight_spans,
+)
 from sources.date_utils import (
     _parse_iso_datetime,
     is_plausible_publication_date,
+    parse_article_body,
     parse_article_meta,
     parse_date_from_html,
     parse_date_from_text,
@@ -311,6 +318,28 @@ def test_legislation_split_from_courts():
     assert "Суды и санкции" not in detect_tags(
         "Законопроект внесён в Госдуму профильным комитетом"
     )
+
+
+def test_appointment_phrasings_detected():
+    """
+    «Гендиректором X стал Y» — самый частый способ сообщить о назначении,
+    и он не ловился ни одним маркером: должность и глагол разделены словами.
+    """
+    assert "Назначения" in detect_tags(
+        "Новым техническим директором маркетплейса «Сравни» стал Денис Былинин"
+    )
+    assert "Назначения" in detect_tags("Гендиректором компании стал Иван Петров")
+    assert "Назначения" in detect_tags("Иван Петров занял пост директора по развитию")
+
+
+def test_became_without_position_is_not_appointment():
+    """«Стал» — слишком частое слово, нужна должность рядом в творительном падеже."""
+    assert "Назначения" not in detect_tags("Рынок стал более конкурентным")
+    assert "Назначения" not in detect_tags("Продукт стал доступен всем пользователям")
+    # прилагательное «главный» не должно проходить за существительное «глава»
+    assert "Назначения" not in detect_tags("Промышленность стала главной мишенью атак")
+    # спонсорство мероприятия — не кадровое назначение
+    assert "Назначения" not in detect_tags("Банк стал партнером фестиваля в Екатеринбурге")
 
 
 def test_hr_signal_levels():
@@ -689,6 +718,128 @@ def test_end_of_listing_detected_by_status():
     assert not BaseParser._is_end_of_listing(error)
     # Обрыв соединения — не конец ленты, а именно ошибка
     assert not BaseParser._is_end_of_listing(requests.ConnectionError())
+
+
+# --------------------------------------------------------------------------
+# Разбор кадровых событий
+# --------------------------------------------------------------------------
+
+APPOINTMENT = (
+    "Новым техническим директором финансового маркетплейса «Сравни» стал "
+    "Денис Былинин. Ранее он работал в компании «ЦВТ», а до этого — в Яндексе."
+)
+
+LAYOFF = (
+    "Скотленд-Ярд сокращает 1 тыс. сотрудников из-за дефицита бюджета. "
+    "Ранее было уволено 3,3 тыс. сотрудников, штат уменьшился на 4,7%."
+)
+
+
+def test_person_and_position_extracted():
+    persons = extract_persons(APPOINTMENT)
+    names = [p.name for p in persons]
+    assert "Денис Былинин" in names
+
+    bylinin = next(p for p in persons if p.name == "Денис Былинин")
+    # Должность приводится к начальной форме: в тексте «техническим директором»
+    assert bylinin.position == "технический директор"
+
+
+def test_person_case_forms_collapse():
+    """Падежные формы одного имени — один человек, а не четыре."""
+    text = ("Михаил Федоров ушёл в отставку. Решение о Михаиле Федорове приняли "
+            "вчера, а Михаилу Федорову предложили другой пост.")
+    names = [p.name for p in extract_persons(text)]
+    assert len(names) == 1
+    # Остаётся самая короткая форма — обычно именительный падеж
+    assert names[0] == "Михаил Федоров"
+
+
+def test_not_a_person_filtered():
+    """Слова с большой буквы, которые именем не являются."""
+    names = [p.name for p in extract_persons("Руководство Скотланд-Ярда приняло решение")]
+    assert not any("Руководство" in n for n in names)
+    assert not any(n.startswith("Украины") for n in extract_persons("власти Украины Михаил"))
+
+
+def test_organizations_from_legal_form_and_quotes():
+    text = 'ООО «ГК ЭнергоПроф» и сеть «ВкусВилл» подписали соглашение'
+    orgs = extract_organizations(text)
+    assert "ГК ЭнергоПроф" in orgs
+    assert "ВкусВилл" in orgs
+
+
+def test_quotes_around_citation_not_an_organization():
+    """В кавычки берут и цитаты — они организациями не являются."""
+    orgs = extract_organizations('Начальник заявил: «Инвалиды нам не нужны», — вспоминает она')
+    assert "Инвалиды нам не нужны" not in orgs
+
+
+def test_organization_case_forms_collapse():
+    text = 'В компании «Цифра» сменилось руководство. Акции «Цифры» выросли, в «Цифре» ждут роста.'
+    orgs = extract_organizations(text)
+    assert len([o for o in orgs if o.lower().startswith("цифр")]) == 1
+
+
+def test_headcount_and_percent_extracted():
+    details = extract_details(LAYOFF, ["Сокращения"])
+    assert any("1 тыс. сотрудников" in h for h in details.headcount)
+    assert any("4,7" in p for p in details.percents)
+
+
+def test_key_sentences_are_those_with_markers():
+    details = extract_details(APPOINTMENT, ["Назначения"])
+    assert details.key_sentences
+    assert "Былинин" in details.key_sentences[0]
+
+
+def test_highlight_spans_cover_markers_and_numbers():
+    spans = highlight_spans(LAYOFF, ["Сокращения"])
+    highlighted = [LAYOFF[s:e] for s, e in spans]
+    assert any("сокращ" in h.lower() for h in highlighted)
+    assert any("1 тыс. сотрудников" in h for h in highlighted)
+    # Отрезки не пересекаются и идут по возрастанию — иначе разметка порвёт текст
+    assert all(spans[i][1] <= spans[i + 1][0] for i in range(len(spans) - 1))
+
+
+def test_highlight_spans_within_text_bounds():
+    spans = highlight_spans(APPOINTMENT, ["Назначения"])
+    assert all(0 <= s < e <= len(APPOINTMENT) for s, e in spans)
+
+
+def test_details_empty_for_blank_text():
+    details = extract_details("", ["Сокращения"])
+    assert details.is_empty
+
+
+def test_article_body_skips_navigation_and_short_bits():
+    html = """
+    <html><body>
+      <header><p>Реклама на сайте и подписка на рассылку нашего издания</p></header>
+      <article>
+        <p>Фото: ТАСС</p>
+        <p>Компания объявила о сокращении штата на пятнадцать процентов в следующем году.</p>
+        <p>Читайте также: другой материал редакции про рынок труда и зарплаты</p>
+        <p>Решение затронет сотрудников региональных подразделений оператора связи.</p>
+      </article>
+    </body></html>
+    """
+    body = parse_article_body(BeautifulSoup(html, "html.parser"))
+    assert "сокращении штата" in body
+    assert "Решение затронет" in body
+    assert "Фото:" not in body
+    assert "Читайте также" not in body
+
+
+def test_article_meta_returns_body_only_on_demand():
+    html = """
+    <html><head><meta property="article:published_time" content="2026-08-01T10:00:00+03:00">
+    </head><body><article>
+      <p>Компания объявила о сокращении штата на пятнадцать процентов в следующем году.</p>
+    </article></body></html>
+    """
+    assert parse_article_meta(html).body is None
+    assert "сокращении штата" in parse_article_meta(html, with_body=True).body
 
 
 # --------------------------------------------------------------------------

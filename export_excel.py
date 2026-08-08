@@ -6,12 +6,15 @@ from typing import Dict, List, Optional
 
 try:
     from openpyxl import Workbook
+    from openpyxl.cell.rich_text import CellRichText, TextBlock
+    from openpyxl.cell.text import InlineFont
     from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
     from openpyxl.utils import get_column_letter
 except ImportError:
     print("Ошибка: Модуль openpyxl не установлен. Установите его: pip install openpyxl")
     raise
 
+from hr_details import extract_details, highlight_spans
 from storage import build_export_path
 
 
@@ -70,9 +73,10 @@ def create_excel_export(
 ) -> str:
     """
     Создает Excel файл с листами:
-    1. Все новости (исходный список до фильтрации по компаниям)
-    2. Компании (все компании из базы данных)
-    3. Новости по компаниям (анализ новостей на предмет упоминаний компаний)
+    1. Кадровые события (подробный разбор материалов с высоким сигналом)
+    2. Все новости (исходный список до фильтрации по компаниям)
+    3. Компании (все компании из базы данных)
+    4. Новости по компаниям (анализ новостей на предмет упоминаний компаний)
 
     Возвращает путь к созданному файлу.
     """
@@ -81,6 +85,10 @@ def create_excel_export(
 
     # Создаем новую книгу Excel
     wb = Workbook()
+
+    # Кадровые события идут первыми: это то, ради чего отчёт открывают.
+    hr_count = create_hr_events_sheet(wb, all_news or [])
+    logger.info("Лист «Кадровые события»: %d строк", hr_count)
 
     create_all_news_sheet(wb, all_news or [])
     create_companies_sheet(wb, all_companies)
@@ -212,6 +220,124 @@ def create_company_news_sheet(wb: Workbook, company_news: Dict[str, List[Dict]])
             row_index += 1
 
     _finalize_sheet(ws, headers, [25, 15, 50, 16, 30, 18, 45, 15, 20, 50, 60])
+
+
+# Подсветка внутри ячейки: важные фрагменты — жирным и цветом, остальной
+# текст обычным. Excel умеет это через rich text, поэтому полный текст статьи
+# можно положить в одну ячейку, не теряя разметку.
+HIGHLIGHT_FONT = InlineFont(b=True, color="C00000")
+PLAIN_FONT = InlineFont()
+
+# Сколько символов текста кладём в ячейку. Excel не принимает больше 32767
+# символов в ячейку, и с запасом ограничиваем себя.
+CELL_TEXT_LIMIT = 28000
+
+# Заливка строк по уровню кадрового сигнала.
+SIGNAL_FILLS = {
+    "высокий": PatternFill(start_color="FFE0E0", end_color="FFE0E0", fill_type="solid"),
+    "средний": PatternFill(start_color="FFF6E0", end_color="FFF6E0", fill_type="solid"),
+}
+
+
+def _highlighted_text(text: str, tags: List[str]):
+    """
+    Текст с выделенными фрагментами: маркеры тем, числа, имена.
+
+    Возвращает CellRichText, если подсвечивать есть что, иначе обычную строку —
+    rich text ради одной сплошной строки создавать незачем.
+    """
+    text = (text or "")[:CELL_TEXT_LIMIT]
+    if not text:
+        return ""
+
+    spans = [(s, e) for s, e in highlight_spans(text, tags) if e <= len(text)]
+    if not spans:
+        return text
+
+    blocks = []
+    cursor = 0
+    for start, end in spans:
+        if start > cursor:
+            blocks.append(TextBlock(PLAIN_FONT, text[cursor:start]))
+        blocks.append(TextBlock(HIGHLIGHT_FONT, text[start:end]))
+        cursor = end
+    if cursor < len(text):
+        blocks.append(TextBlock(PLAIN_FONT, text[cursor:]))
+
+    return CellRichText(*blocks)
+
+
+def create_hr_events_sheet(wb: Workbook, all_news: List[Dict], levels=("высокий",)) -> int:
+    """
+    Лист с подробным разбором кадровых событий.
+
+    Здесь материал разложен на составляющие: кто, в какой должности, в какой
+    организации, сколько людей и процентов затронуто, — и рядом полный текст
+    статьи с подсветкой тех фрагментов, из-за которых материал сюда попал.
+    Так проверка занимает секунды: не нужно открывать ссылку и искать глазами.
+
+    Возвращает число строк на листе.
+    """
+    events = [news for news in all_news if news.get('hr_signal') in levels]
+    ws = wb.create_sheet(title="Кадровые события")
+
+    headers = [
+        "Дата",
+        "Влияние",
+        "Компании из списка",
+        "Персоны",
+        "Должности",
+        "Организации из текста",
+        "Численность",
+        "Проценты",
+        "Суммы",
+        "Темы",
+        "Заголовок",
+        "Ключевые фрагменты",
+        "Полный текст (важное выделено)",
+        "Источник",
+        "Ссылка",
+    ]
+    _write_header(ws, headers, "8B0000")
+
+    # Сначала свежие: отчёт читают сверху вниз.
+    events.sort(key=lambda n: (n.get('published_at') or ""), reverse=True)
+
+    for row_index, news in enumerate(events, start=2):
+        tags = [t.strip() for t in (news.get('tags') or "").split(",") if t.strip()]
+        # Полный текст есть не у всех: телеграм-посты приходят целиком, а часть
+        # страниц могла не отдаться. Тогда разбираем то, что есть.
+        text = news.get('full_text') or news.get('summary') or ""
+        details = extract_details(f"{news.get('title', '')}. {text}", tags)
+
+        ws.append([
+            (news.get('published_at') or "")[:10],
+            news.get('hr_signal', ''),
+            news.get('companies', ''),
+            "; ".join(p.name for p in details.persons[:6]),
+            "; ".join(sorted({p.position for p in details.persons if p.position})),
+            ", ".join(details.organizations[:6]),
+            ", ".join(details.headcount[:4]),
+            ", ".join(details.percents[:4]),
+            ", ".join(details.money[:3]),
+            news.get('tags', ''),
+            news.get('title', ''),
+            "\n".join(details.key_sentences),
+            _highlighted_text(text, tags),
+            news.get('source', ''),
+            news.get('url', ''),
+        ])
+
+        fill = SIGNAL_FILLS.get(news.get('hr_signal', ''))
+        if fill is not None:
+            for col in range(1, 3):
+                ws.cell(row=row_index, column=col).fill = fill
+
+    _finalize_sheet(
+        ws, headers,
+        [12, 10, 24, 30, 26, 34, 20, 18, 18, 28, 55, 60, 100, 14, 46],
+    )
+    return len(events)
 
 
 def export_analysis_to_excel(

@@ -260,6 +260,70 @@ def cmd_parse_and_export(args: argparse.Namespace) -> None:
     print_top_companies(company_news, args.show_top)
 
 
+def enrich_hr_articles(
+    rows: List[Dict], workers: int = 4, levels: tuple = ("высокий",)
+) -> int:
+    """
+    Догружает полный текст статей у материалов с кадровым сигналом.
+
+    Тело статьи нужно только здесь: имя назначенца, его должность и обе
+    компании почти никогда не помещаются в лид — медианная длина лида около
+    140 символов. Для остальных материалов тело не хранится, иначе база росла
+    бы на порядок ради данных, которые никто не читает.
+
+    Возвращает число записей, которым текст удалось получить.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from sources.base_parser import DEFAULT_USER_AGENT
+    from sources.date_utils import fetch_article_meta
+    from storage import get_urls_without_full_text, update_full_text
+
+    selected = [row for row in rows if row['hr_signal'] in levels]
+    # Телеграм-посты приходят целиком, догружать у них нечего.
+    urls = [row['url'] for row in selected if not row['url'].startswith("https://t.me/")]
+    urls = get_urls_without_full_text(urls)
+
+    if not urls:
+        logger.info("Полные тексты кадровых событий уже собраны")
+        return 0
+
+    logger.info("Догрузка полных текстов кадровых событий: %d", len(urls))
+    headers = {"User-Agent": DEFAULT_USER_AGENT}
+    filled = 0
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(fetch_article_meta, url, headers, None, True): url
+            for url in urls
+        }
+        for done, future in enumerate(as_completed(futures), 1):
+            if done % 25 == 0 or done == len(urls):
+                logger.info("  загружено %d из %d, с текстом %d", done, len(urls), filled)
+
+            url = futures[future]
+            try:
+                meta = future.result()
+            except Exception as exc:  # noqa: BLE001 — сбой одной статьи не роняет прогон
+                logger.debug("%s: %s", url, exc)
+                continue
+
+            if meta.body:
+                update_full_text(url, meta.body)
+                filled += 1
+
+    return filled
+
+
+def cmd_enrich_hr(args: argparse.Namespace) -> None:
+    """Догружает полные тексты кадровых событий отдельной командой."""
+    levels = tuple(args.levels)
+    rows, _ = get_news_and_companies_from_db(limit=args.limit)
+    filled = enrich_hr_articles(rows, workers=args.workers, levels=levels)
+
+    print(f"\nДогружено полных текстов: {filled}")
+
+
 def cmd_collect(args: argparse.Namespace) -> None:
     """
     Полный цикл за один запуск: сбор → лиды → анализ → Excel.
@@ -310,7 +374,7 @@ def cmd_collect(args: argparse.Namespace) -> None:
         cmd_backfill_summaries(backfill_args)
 
     # Шаг 3. Анализ за период
-    print("\n[3/4] Анализ упоминаний компаний и разметка материалов...")
+    print("\n[3/5] Анализ упоминаний компаний и разметка материалов...")
     rows, company_news = get_news_and_companies_from_db(
         limit=args.analysis_limit, start_date=period_start, end_date=period_end
     )
@@ -335,8 +399,23 @@ def cmd_collect(args: argparse.Namespace) -> None:
 
     print_top_companies(company_news, args.show_top)
 
-    # Шаг 4. Excel за тот же период
-    print("\n[4/4] Формирование Excel...")
+    # Шаг 4. Полные тексты кадровых событий — только для них, и только если
+    # текста ещё нет. Повторный прогон ничего не перекачивает.
+    if args.no_hr_texts:
+        print("\n[4/5] Догрузка полных текстов пропущена (--no-hr-texts)")
+    else:
+        print("\n[4/5] Догрузка полных текстов кадровых событий...")
+        filled = enrich_hr_articles(rows, workers=args.workers, levels=tuple(args.hr_levels))
+        print(f"Полных текстов получено: {filled}")
+        if filled:
+            # Перечитываем: в строках должен оказаться свежий текст, иначе
+            # подробный лист в отчёте останется пустым.
+            rows, company_news = get_news_and_companies_from_db(
+                limit=args.analysis_limit, start_date=period_start, end_date=period_end
+            )
+
+    # Шаг 5. Excel за тот же период
+    print("\n[5/5] Формирование Excel...")
     excel_path = export_excel_safe(
         args.analysis_limit, start_date=period_start, end_date=period_end
     )
@@ -724,7 +803,26 @@ def build_parser() -> argparse.ArgumentParser:
                                 help="Пропустить догрузку описаний (быстрее, но теги хуже)")
     collect_parser.add_argument("--source", action="append", metavar="ИМЯ",
                                 help="Собрать только указанный источник (можно повторять)")
+    collect_parser.add_argument("--no-hr-texts", action="store_true",
+                                help="Не догружать полные тексты кадровых событий")
+    collect_parser.add_argument("--hr-levels", nargs="+", default=["высокий"],
+                                metavar="УРОВЕНЬ",
+                                help="Для каких сигналов брать полный текст "
+                                     "(по умолчанию: высокий)")
     collect_parser.set_defaults(func=cmd_collect)
+
+    # enrich-hr
+    enrich_parser = subparsers.add_parser(
+        "enrich-hr", help="Догрузить полные тексты кадровых событий"
+    )
+    enrich_parser.add_argument("--limit", type=int, default=100000,
+                               help="Сколько материалов просмотреть (по умолчанию: все)")
+    enrich_parser.add_argument("--workers", type=int, default=4,
+                               help="Число параллельных запросов (по умолчанию: 4)")
+    enrich_parser.add_argument("--levels", nargs="+", default=["высокий"],
+                               metavar="УРОВЕНЬ",
+                               help="Уровни сигнала (по умолчанию: высокий)")
+    enrich_parser.set_defaults(func=cmd_enrich_hr)
 
     # seed-companies
     seed_parser = subparsers.add_parser(

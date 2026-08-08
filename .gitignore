@@ -10,8 +10,9 @@ __pycache__/
 .pytest_cache/
 
 # База данных и выгрузки
-news.db
-news.db-journal
+# Звёздочка нужна и для журналов SQLite, и для резервных копий
+# вида news.db.backup-before-merge.
+news.db*
 exports/
 *.xlsx
 *.csv

@@ -1,2 +1,29 @@
-/news.db
-.xlsx
+# Виртуальные окружения
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# База данных и выгрузки
+news.db
+news.db-journal
+exports/
+*.xlsx
+*.csv
+
+# Логи прогонов
+logs/
+
+# Редакторы и ОС
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Локальные настройки Claude Code: содержат пути к домашнему каталогу
+.claude/settings.local.json

@@ -432,20 +432,18 @@ def analyze_text(text: str, source: str | None = None) -> Analysis:
     return Analysis(material_type, tags, hr_signal(tags, material_type))
 
 
-# Теги, по которым новость считается кадровой. Из их маркеров собирается фильтр
-# для широких федеральных лент: без него в базу попадали бы сводки с фронта и
+# Теги, по которым новость считается кадровой, — используются для отбора в
+# широких федеральных лентах: без него в базу попадали бы сводки с фронта и
 # спортивные результаты, а нужны кадровые движения.
-HR_TOPIC_TAGS = ("Назначения", "Сокращения", "Найм и рост")
-
-HR_TOPIC_PATTERN = re.compile(
-    "|".join(
-        sorted(
-            (re.escape(marker) for tag in HR_TOPIC_TAGS for marker in TAG_MARKERS[tag]),
-            key=len,
-            reverse=True,
-        )
-    )
-)
+#
+# Раньше здесь была отдельная «голая» регулярка — OR всех маркеров без учёта
+# их неоднозначности (AMBIGUOUS_MARKERS/TAG_CONTEXT/MARKER_EXCLUSIONS). Из-за
+# этого «стал» матчился как подстрока в «сталелитейным», и связка с любым
+# словом из BUSINESS_CONTEXT (тут — «завод») пропускала в отчёт новость про
+# ковш для платформы «Серп и Молот». detect_tags() уже прогоняет весь этот
+# разбор для каждого маркера, поэтому фильтр использует его напрямую, а не
+# дублирует логику отдельной регуляркой.
+HR_TOPIC_TAGS = frozenset({"Назначения", "Сокращения", "Найм и рост"})
 
 # Одной кадровой лексики для отбора мало: «назначение пенальти» и «возглавил
 # клуб» — тоже назначения. Поэтому нужен ещё и деловой контекст...
@@ -485,6 +483,9 @@ def is_hr_business_news(text: str) -> bool:
     lowered = text.lower()
     if any(word in lowered for word in NON_BUSINESS_NOISE):
         return False
-    if not HR_TOPIC_PATTERN.search(lowered):
+    # detect_tags уже разрешает неоднозначность каждого маркера — включая
+    # «стал» и «сократ», для которых голая подстрока ничего не говорит без
+    # проверки контекста рядом.
+    if not (set(detect_tags(text)) & HR_TOPIC_TAGS):
         return False
     return any(word in lowered for word in BUSINESS_CONTEXT)

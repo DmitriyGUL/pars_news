@@ -5,7 +5,8 @@
 
 * Профильные (Forbes, CNews, vc.ru, Frank Media) — тематика издания и так
   близка к задаче, берём ленту целиком.
-* Федеральные (Коммерсантъ, Ведомости, ТАСС, Интерфакс, РБК) — пишут обо всём,
+* Федеральные и широкотематические (Коммерсантъ, Ведомости, ТАСС, Интерфакс,
+  РБК, «Российская газета», Право.ru, Habr) — пишут обо всём в своей области,
   поэтому к ним применяется отбор TOPIC_FILTER: нужна кадровая лексика вместе
   с деловым контекстом. Иначе на одну кадровую новость приходились бы сотни
   спортивных и военных сводок, а «назначение пенальти» считалось бы
@@ -107,6 +108,42 @@ class RbcFeedParser(RssParser):
     TOPIC_FILTER = staticmethod(is_hr_business_news)
 
 
+class RgRuParser(RssParser):
+    """«Российская газета» — законы и государственные решения, только кадровое.
+
+    Лента общая по изданию (культура, спорт, международная политика), поэтому
+    без отбора мусора было бы в разы больше кадровых новостей.
+    """
+
+    SOURCE_NAME = "rg_ru"
+    FEED_URLS = ("https://rg.ru/xml/index.xml",)
+    TOPIC_FILTER = staticmethod(is_hr_business_news)
+
+
+class PravoRuParser(RssParser):
+    """Право.ru — законодательство, суды, legaltech, только кадровое.
+
+    Лента уже по теме, чем федеральные СМИ, но не всё в ней про кадры
+    («суд Норвегии арестовал судно»), поэтому фильтр остаётся.
+    """
+
+    SOURCE_NAME = "pravo_ru"
+    FEED_URLS = ("https://pravo.ru/rss/",)
+    TOPIC_FILTER = staticmethod(is_hr_business_news)
+
+
+class HabrParser(RssParser):
+    """Habr — общая лента, только кадровое.
+
+    Лента — это личные технические посты и туториалы, кадровых новостей в
+    ней доли процента; без фильтра БД захлебнулась бы нерелевантным.
+    """
+
+    SOURCE_NAME = "habr"
+    FEED_URLS = ("https://habr.com/ru/rss/all/all/?fl=ru",)
+    TOPIC_FILTER = staticmethod(is_hr_business_news)
+
+
 def _make_fetch(parser_class):
     """Функция-обёртка fetch для источника — единый интерфейс с main.py."""
 
@@ -129,3 +166,6 @@ fetch_vedomosti = _make_fetch(VedomostiParser)
 fetch_tass = _make_fetch(TassParser)
 fetch_interfax = _make_fetch(InterfaxParser)
 fetch_rbc_feed = _make_fetch(RbcFeedParser)
+fetch_rg_ru = _make_fetch(RgRuParser)
+fetch_pravo_ru = _make_fetch(PravoRuParser)
+fetch_habr = _make_fetch(HabrParser)

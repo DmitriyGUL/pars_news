@@ -14,7 +14,10 @@ import time
 from typing import Callable, Dict, List, Sequence, Tuple
 
 from models import NewsItem
-from sources import adindex, comnews, forbes_companies, rb, rbc_companies, ria_companies
+from sources import (
+    adindex, comnews, forbes_companies, hh_articles, rb, rbc_companies,
+    ria_companies, tadviser,
+)
 from sources import rss_sources, telegram_sources
 
 
@@ -37,6 +40,8 @@ PARSERS: Sequence[Tuple[str, Callable[..., List[NewsItem]]]] = (
     ("ria_companies", ria_companies.fetch),
     ("forbes_companies", forbes_companies.fetch),
     ("rb_hr", rb.fetch),
+    ("tadviser", tadviser.fetch),
+    ("hh_articles", hh_articles.fetch),
 
     # 2. Профильные ленты
     ("rb_feed", rb.fetch_feed),
@@ -55,6 +60,9 @@ PARSERS: Sequence[Tuple[str, Callable[..., List[NewsItem]]]] = (
     ("tass", rss_sources.fetch_tass),
     ("interfax", rss_sources.fetch_interfax),
     ("rbc_feed", rss_sources.fetch_rbc_feed),
+    ("rg_ru", rss_sources.fetch_rg_ru),
+    ("pravo_ru", rss_sources.fetch_pravo_ru),
+    ("habr", rss_sources.fetch_habr),
 )
 
 
@@ -70,6 +78,8 @@ PARSER_CLASSES: Dict[str, type] = {
     "ria_companies": ria_companies.RiaCompaniesParser,
     "forbes_companies": forbes_companies.ForbesCompaniesParser,
     "rb_hr": rb.RbHrParser,
+    "tadviser": tadviser.TadviserParser,
+    "hh_articles": hh_articles.HhArticlesParser,
     "rb_feed": rb.RbFeedParser,
     "forbes_feed": rss_sources.ForbesFeedParser,
     "cnews": rss_sources.CnewsParser,
@@ -82,6 +92,9 @@ PARSER_CLASSES: Dict[str, type] = {
     "tass": rss_sources.TassParser,
     "interfax": rss_sources.InterfaxParser,
     "rbc_feed": rss_sources.RbcFeedParser,
+    "rg_ru": rss_sources.RgRuParser,
+    "pravo_ru": rss_sources.PravoRuParser,
+    "habr": rss_sources.HabrParser,
 }
 
 

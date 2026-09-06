@@ -50,7 +50,7 @@ from sources.base_parser import BaseParser
 from sources.rb import RbHrParser
 from sources.telegram import TelegramParser
 from sources.rss_parser import RssParser, parse_feed_date
-from cli import build_parser
+from cli import build_parser, source_health_verdict
 from main import PARSER_CLASSES, PARSERS
 from tagging import (
     analyze_text,
@@ -606,6 +606,61 @@ def test_collect_accepts_period_and_sources():
     parser = build_parser()
     args = parser.parse_args(["collect", "--days", "30", "--source", "rb_hr"])
     assert args.days == 30 and args.source == ["rb_hr"]
+
+
+# --------------------------------------------------------------------------
+# Здоровье источников
+# --------------------------------------------------------------------------
+
+def _run(status: str, fetched: int = 0, error: str | None = None) -> dict:
+    """Короткая фабрика записи истории — свежие идут первыми в списке."""
+    return {"run_at": "irrelevant", "status": status, "fetched": fetched, "error": error}
+
+
+def test_health_ok_when_last_run_has_data():
+    mark, note = source_health_verdict([_run("ok", 12), _run("ok", 0)], zero_streak=3)
+    assert mark.strip() == "ок"
+    assert "12" in note
+
+
+def test_health_single_zero_is_not_alarming():
+    """Один ноль подряд — это ещё не серия, тревогу бить рано."""
+    mark, note = source_health_verdict([_run("ok", 0), _run("ok", 5)], zero_streak=3)
+    assert mark.strip() == "ноль"
+
+
+def test_health_flags_zero_streak_even_without_history_of_success():
+    """
+    Реальный случай: rbc_companies заблокирован анти-ботом с первого прогона
+    и не дал ни одной записи ни разу. Более ранняя версия проверки требовала
+    хотя бы один успешный прогон в прошлом и такие случаи пропускала.
+    """
+    runs = [_run("ok", 0), _run("ok", 0), _run("ok", 0)]
+    mark, note = source_health_verdict(runs, zero_streak=3)
+    assert mark.strip() == "ВНИМАНИЕ"
+    assert "ни разу не дал" in note
+
+
+def test_health_flags_zero_streak_after_earlier_success():
+    runs = [_run("ok", 0), _run("ok", 0), _run("ok", 0), _run("ok", 40)]
+    mark, note = source_health_verdict(runs, zero_streak=3)
+    assert mark.strip() == "ВНИМАНИЕ"
+    assert "раньше источник что-то давал" in note
+
+
+def test_health_error_wins_over_zero_streak():
+    """Упавший последний прогон важнее серии нулей — это разные проблемы."""
+    runs = [_run("error", 0, error="ConnectionError: timeout"), _run("ok", 0), _run("ok", 0)]
+    mark, note = source_health_verdict(runs, zero_streak=2)
+    assert mark.strip() == "ОШИБКА"
+    assert "timeout" in note
+
+
+def test_health_zero_streak_threshold_respected():
+    """Ниже порога — это ещё не аномалия, даже если ноль повторился дважды."""
+    runs = [_run("ok", 0), _run("ok", 0), _run("ok", 15)]
+    mark, _ = source_health_verdict(runs, zero_streak=3)
+    assert mark.strip() == "ноль"
 
 
 def test_every_configured_source_is_in_registry():

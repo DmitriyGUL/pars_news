@@ -120,6 +120,10 @@ def run_all_parsers(
         if not only_sources or name in only_sources
     ]
 
+    # Импорт здесь, а не наверху файла: storage тянет sqlite3, а main.py
+    # должен оставаться пригодным для импорта в скриптах, где БД не нужна.
+    from storage import record_source_run
+
     for number, (source_name, fetch_func) in enumerate(planned, 1):
         # Номер источника в логе: по нему видно, на каком именно прогон встал,
         # даже если сообщение об ошибке потерялось.
@@ -131,16 +135,23 @@ def run_all_parsers(
                 limit=limit_per_source, days=days,
                 with_summaries=with_summaries, max_pages=max_pages,
             )
-        except Exception:  # noqa: BLE001 — один источник не должен ронять прогон
+        except Exception as exc:  # noqa: BLE001 — один источник не должен ронять прогон
             # exc_info=True: без трейсбека по одной строке причину не найти,
             # а прогон длинный и повторить его дорого.
             logger.exception("[%d/%d] %s: источник упал", number, len(planned), source_name)
+            record_source_run(
+                source_name, "error",
+                elapsed_seconds=time.monotonic() - started,
+                error=f"{type(exc).__name__}: {exc}"[:500],
+            )
             continue
 
+        elapsed = time.monotonic() - started
         logger.info(
             "[%d/%d] %s: получено %d записей за %.0f с",
-            number, len(planned), source_name, len(items), time.monotonic() - started,
+            number, len(planned), source_name, len(items), elapsed,
         )
+        record_source_run(source_name, "ok", fetched=len(items), elapsed_seconds=elapsed)
         collected.extend(items)
 
     return collected

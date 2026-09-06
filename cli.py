@@ -634,6 +634,10 @@ def cmd_sources(args: argparse.Namespace) -> None:
     """Показывает подключённые источники и сколько новостей от каждого в БД."""
     from main import PARSER_CLASSES, PARSERS
 
+    if args.health:
+        _print_source_health(args)
+        return
+
     with get_connection() as conn:
         cursor = conn.execute("SELECT source, COUNT(*) FROM news GROUP BY source")
         counts = dict(cursor.fetchall())
@@ -664,6 +668,98 @@ def cmd_sources(args: argparse.Namespace) -> None:
         for name in sorted(unknown):
             print(f"  {name}: {counts[name]} записей")
         print("Команда cleanup сочтёт их мусором — проверьте, прежде чем запускать её.")
+
+    print("\nПодробная история прогонов: python cli.py sources --health")
+
+
+def source_health_verdict(runs: List[Dict], zero_streak: int) -> tuple[str, str]:
+    """
+    Определяет вердикт по истории прогонов одного источника: (метка, пояснение).
+
+    Чистая функция без обращения к БД — принимает уже прочитанную историю
+    (свежие записи первыми), поэтому тестируется на выдуманных данных.
+
+    Текстовые пометки, не эмодзи: консоль Windows по умолчанию открыта в
+    кодировке cp1251, где большинства emoji попросту нет, и попытка его
+    напечатать роняла команду UnicodeEncodeError.
+    """
+    last = runs[0]
+    trailing_zero = 0
+    for run in runs:
+        if run["status"] == "ok" and run["fetched"] == 0:
+            trailing_zero += 1
+        else:
+            break
+
+    ok_runs = [r for r in runs if r["status"] == "ok"]
+    ever_nonzero = any(r["fetched"] > 0 for r in ok_runs)
+
+    if last["status"] == "error":
+        return "ОШИБКА ", f"последний прогон упал: {(last['error'] or '')[:70]}"
+
+    # ever_nonzero не участвует в решении «бить тревогу или нет»: серия нулей
+    # подряд подозрительна сама по себе, даже если источник не давал новостей
+    # вообще ни разу за всю записанную историю (именно так выглядит
+    # rbc_companies, заблокированный анти-ботом с первого же прогона, — более
+    # ранняя версия этой проверки такие случаи пропускала). ever_nonzero
+    # влияет только на формулировку.
+    if trailing_zero >= zero_streak:
+        if ever_nonzero:
+            note = (f"{trailing_zero} прогонов подряд ноль записей, "
+                    f"хотя раньше источник что-то давал")
+        else:
+            note = (f"{trailing_zero} прогонов подряд ноль записей, "
+                    f"и ни разу не дал ни одной за всю историю")
+        return "ВНИМАНИЕ", note
+
+    if last["status"] == "ok" and last["fetched"] == 0:
+        return "ноль    ", "ноль в последнем прогоне — пока не подряд, возможно просто нет новостей"
+
+    return "ок      ", f"последний прогон: {last['fetched']} записей"
+
+
+def _print_source_health(args: argparse.Namespace) -> None:
+    """
+    Печатает историю прогонов по каждому источнику и подсвечивает аномалии.
+
+    Разовый ноль записей от источника не отличить от тихой поломки без
+    истории — отсюда и весь смысл команды: она смотрит на последние N
+    прогонов, а не на один снимок.
+    """
+    from main import PARSERS
+    from storage import get_source_run_history
+
+    history = get_source_run_history(limit_per_source=args.window)
+    known_sources = [name for name, _ in PARSERS]
+
+    if not history:
+        print("\nИстория прогонов пуста — источники ещё ни разу не собирались "
+              "через parse/collect (или таблица появилась только что).")
+        return
+
+    print(f"\nЗдоровье источников (последние {args.window} прогонов на источник):\n")
+
+    rows = []
+    for name in known_sources:
+        runs = history.get(name)
+        if not runs:
+            rows.append((name, "—", "нет истории", ""))
+            continue
+
+        mark, note = source_health_verdict(runs, args.zero_streak)
+        rows.append((name, mark, note, runs[0]["run_at"]))
+
+    for name, mark, note, run_at in rows:
+        print(f"  [{mark}] {name:18s} {note}")
+        if run_at:
+            print(f"    {'':18s} последний прогон: {run_at}")
+
+    unmonitored = set(known_sources) - set(history)
+    if unmonitored:
+        print(f"\nЕщё не запускались ни разу: {', '.join(sorted(unmonitored))}")
+
+    print(f"\nПорог «подряд ноль» — {args.zero_streak} прогона(ов), "
+          f"меняется флагом --zero-streak.")
 
 
 def cmd_init(args: argparse.Namespace) -> None:
@@ -697,6 +793,7 @@ def build_parser() -> argparse.ArgumentParser:
   %(prog)s refresh-dates
   %(prog)s backfill-summaries
   %(prog)s tags --show-signal высокий
+  %(prog)s sources --health
         """
     )
 
@@ -885,6 +982,15 @@ def build_parser() -> argparse.ArgumentParser:
     sources_parser = subparsers.add_parser(
         "sources", help="Список подключённых источников новостей"
     )
+    sources_parser.add_argument("--health", action="store_true",
+                                help="История прогонов вместо статичного списка: "
+                                     "показывает, какие источники тихо перестали давать новости")
+    sources_parser.add_argument("--window", type=int, default=10,
+                                help="Сколько последних прогонов на источник смотреть "
+                                     "(по умолчанию: 10, только с --health)")
+    sources_parser.add_argument("--zero-streak", type=int, default=3,
+                                help="После скольких подряд нулевых прогонов считать это "
+                                     "аномалией, а не совпадением (по умолчанию: 3, только с --health)")
     sources_parser.set_defaults(func=cmd_sources)
 
     # init

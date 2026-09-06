@@ -111,7 +111,26 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_news_created_at ON news(created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_companies_source ON companies(source)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_companies_year ON companies(year)")
-        
+
+        # История прогонов источников — чтобы отличить «сегодня просто не было
+        # кадровых новостей» от «источник тихо сломался». Без этого ноль
+        # записей от источника и настоящая поломка выглядят одинаково: узнать
+        # разницу можно только по динамике за несколько прогонов.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS source_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL,
+                run_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                fetched INTEGER NOT NULL DEFAULT 0,
+                elapsed_seconds REAL,
+                error TEXT
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_source_runs_source ON source_runs(source, run_at)")
+
         conn.commit()
 
 
@@ -457,3 +476,68 @@ def export_to_csv(
             })
 
     return str(output_path)
+
+
+# --------------------------------------------------------------------------
+# Здоровье источников
+# --------------------------------------------------------------------------
+
+def record_source_run(
+    source: str,
+    status: str,
+    fetched: int = 0,
+    elapsed_seconds: float | None = None,
+    error: str | None = None,
+) -> None:
+    """
+    Фиксирует один прогон одного источника — успешный или упавший.
+
+    Пишется при каждом вызове run_all_parsers, то есть при любой команде,
+    которая ходит в сеть (parse, collect, parse-and-export). Разовый ноль
+    записей от источника не отличить от тихой поломки без истории — отсюда
+    и нужна эта таблица.
+    """
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO source_runs (source, run_at, status, fetched, elapsed_seconds, error)
+            VALUES (?, datetime('now'), ?, ?, ?, ?)
+            """,
+            (source, status, fetched, elapsed_seconds, error),
+        )
+        conn.commit()
+
+
+def get_source_run_history(limit_per_source: int = 20) -> Dict[str, List[Dict]]:
+    """
+    Последние прогоны по каждому источнику, свежие первыми.
+
+    Возвращает {источник: [{'run_at', 'status', 'fetched', 'error'}, ...]}.
+    Ограничение на источник берётся через оконную функцию, а не общий LIMIT:
+    иначе частый мелкий источник вытеснил бы историю редкого из выборки.
+    """
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            SELECT source, run_at, status, fetched, error
+            FROM (
+                SELECT
+                    source, run_at, status, fetched, error,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY source ORDER BY run_at DESC, id DESC
+                    ) AS rn
+                FROM source_runs
+            )
+            WHERE rn <= ?
+            ORDER BY source, run_at DESC
+            """,
+            (limit_per_source,),
+        )
+        rows = cursor.fetchall()
+
+    history: Dict[str, List[Dict]] = {}
+    for source, run_at, status, fetched, error in rows:
+        history.setdefault(source, []).append(
+            {"run_at": run_at, "status": status, "fetched": fetched, "error": error}
+        )
+    return history

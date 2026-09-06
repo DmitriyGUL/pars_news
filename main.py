@@ -16,7 +16,7 @@ from typing import Callable, Dict, List, Sequence, Tuple
 from models import NewsItem
 from sources import (
     adindex, comnews, forbes_companies, hh_articles, rb, rbc_companies,
-    ria_companies, tadviser,
+    ria_companies, sostav, tadviser,
 )
 from sources import rss_sources, telegram_sources
 
@@ -42,6 +42,7 @@ PARSERS: Sequence[Tuple[str, Callable[..., List[NewsItem]]]] = (
     ("rb_hr", rb.fetch),
     ("tadviser", tadviser.fetch),
     ("hh_articles", hh_articles.fetch),
+    ("sostav", sostav.fetch),
 
     # 2. Профильные ленты
     ("rb_feed", rb.fetch_feed),
@@ -80,6 +81,7 @@ PARSER_CLASSES: Dict[str, type] = {
     "rb_hr": rb.RbHrParser,
     "tadviser": tadviser.TadviserParser,
     "hh_articles": hh_articles.HhArticlesParser,
+    "sostav": sostav.SostavParser,
     "rb_feed": rb.RbFeedParser,
     "forbes_feed": rss_sources.ForbesFeedParser,
     "cnews": rss_sources.CnewsParser,

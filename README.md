@@ -209,6 +209,7 @@ python cli.py refresh-dates --all       # пересчитать вообще в
 | rbc_companies | `/news/` | параметр `?page=N` (`PAGE_PARAM`) |
 | ria_companies | `/company/` | `data-url` блока «Еще», далее `data-next-url` порций |
 | rb_hr | `rb.ru/tag/hr/` | `?page=N`; «Читать ещё» рисуется скриптом, разделу ~480 страниц |
+| sostav | `sostav.ru/news` | обычные ссылки `?page=N`; дата — из `ld+json` (нет ни `<time>`, ни `meta`) |
 | tadviser | `tadviser.ru` (Статья:/Персона:/Компания:) | нет — MediaWiki, «Ещё» ведёт в никуда |
 | hh_articles | `hh.ru/articles` | нет — «Показать ещё» без числового параметра |
 | forbes_companies | `/novosti-kompaniy/` | нет — сервер отдаёт только 11 материалов |
